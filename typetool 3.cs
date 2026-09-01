@@ -14,7 +14,7 @@ public class AppConfig
     public bool EnterKeyEnabled { get; set; } = false;
     public bool ShowPreviewWindow { get; set; } = true;
     public int TypingDelayMs { get; set; } = 1; // Standard 1ms
-    
+
     public HotkeyDef TypingHotkey { get; set; } = new HotkeyDef(2, 66); // Strg+B
     public HotkeyDef EnterToggleHotkey { get; set; } = new HotkeyDef(3, 66); // Strg+Alt+B
 }
@@ -26,7 +26,7 @@ public class HotkeyDef
 
     public HotkeyDef() { }
     public HotkeyDef(int mod, int vk) { FsModifiers = mod; VkCode = vk; }
-    
+
     public string ToReadableString()
     {
         var keys = new List<string>();
@@ -49,7 +49,7 @@ static class Program
         // TRICK: Icon generieren, wenn angefordert
         if (args.Length > 0 && args[0] == "--generate-icon")
         {
-            try 
+            try
             {
                 using (var icon = IconGenerator.CreateDarkIcon())
                 using (var stream = new FileStream("icon.ico", FileMode.Create))
@@ -85,12 +85,12 @@ public class TypeToolApplication : ApplicationContext
 {
     private NotifyIcon _trayIcon;
     private ContextMenuStrip _contextMenu;
-    public AppConfig Config = new(); 
+    public AppConfig Config = new();
     private const string ConfigFile = "config.json";
-    
+
     private HotkeyWindow _hotkeyWindow;
     private NotificationForm _notificationForm; // NEU: Eigene Benachrichtigung
-    
+
     private const int ID_TYPE = 1;
     private const int ID_TOGGLE_ENTER = 2;
 
@@ -112,7 +112,7 @@ public class TypeToolApplication : ApplicationContext
 
         _trayIcon = new NotifyIcon
         {
-            Icon = customIcon, 
+            Icon = customIcon,
             ContextMenuStrip = _contextMenu,
             Visible = true,
             Text = "TypeTool"
@@ -132,10 +132,10 @@ public class TypeToolApplication : ApplicationContext
 
         var itemPreview = new ToolStripMenuItem("Benachrichtigungen", null, (s, e) => TogglePreview()) { Checked = Config.ShowPreviewWindow };
         var itemEnter = new ToolStripMenuItem("Enter am Ende", null, (s, e) => ToggleEnter()) { Checked = Config.EnterKeyEnabled };
-        
+
         var itemHotkeys = new ToolStripMenuItem("Hotkeys ändern...", null, (s, e) => OpenHotkeySettings());
         var itemSpeed = new ToolStripMenuItem("Geschwindigkeit...", null, (s, e) => ChangeSpeed());
-        
+
         var itemRestart = new ToolStripMenuItem("Neustarten", null, (s, e) => RestartApp());
         var itemExit = new ToolStripMenuItem("Beenden", null, (s, e) => ExitApp());
 
@@ -182,11 +182,11 @@ public class TypeToolApplication : ApplicationContext
     {
         using var form = new HotkeySettingsForm(this);
         form.Icon = _trayIcon.Icon;
-        
+
         if (form.ShowDialog() == DialogResult.OK)
         {
             SaveConfig();
-            RegisterHotKeys(); 
+            RegisterHotKeys();
             UpdateMenu();
             UpdateTrayTooltip();
             ShowNotification("Info", "Hotkeys erfolgreich gespeichert!");
@@ -230,13 +230,13 @@ public class TypeToolApplication : ApplicationContext
         }
 
         string text = Clipboard.GetText();
-        text = text.TrimEnd(); 
+        text = text.TrimEnd();
 
         bool needsWarning = text.Length >= 100;
 
         if (needsWarning)
         {
-            ShowNotification("ACHTUNG: Großer Text", 
+            ShowNotification("ACHTUNG: Großer Text",
                 $"{text.Length} Zeichen werden getippt.\nDrücke ESC zum Abbrechen (Start in 1.5s)");
         }
         else if (Config.ShowPreviewWindow)
@@ -251,22 +251,34 @@ public class TypeToolApplication : ApplicationContext
             {
                 if (needsWarning)
                 {
-                    for(int i=0; i < 30; i++) 
+                    for (int i = 0; i < 30; i++)
                     {
-                        if ((NativeMethods.GetAsyncKeyState(NativeMethods.VK_ESCAPE) & 0x8000) != 0) return; 
+                        if ((NativeMethods.GetAsyncKeyState(NativeMethods.VK_ESCAPE) & 0x8000) != 0) return;
                         Thread.Sleep(50);
                     }
                 }
 
+                // Kurz warten, damit das Zielfeld fokussiert ist
+                Thread.Sleep(50);
+
                 foreach (char c in text)
                 {
                     if ((NativeMethods.GetAsyncKeyState(NativeMethods.VK_ESCAPE) & 0x8000) != 0) return;
-                    
-                    if (c == '\r') continue; 
-                    string keys = c.ToString();
-                    if ("+^%~(){}[]".Contains(c)) keys = "{" + c + "}";
-                    
-                    SendKeys.SendWait(keys);
+
+                    if (c == '\r') continue;
+
+                    // GEÄNDERT (Fix Zeilenumbrüche): "\n" als Unicode-Zeichen über SendInput
+                    // erzeugt in den meisten Textfeldern KEINEN echten Zeilenumbruch.
+                    // Deshalb hier stattdessen einen echten Enter-Tastendruck (VK_RETURN) simulieren.
+                    if (c == '\n')
+                    {
+                        NativeMethods.SendEnterKey();
+                    }
+                    else
+                    {
+                        SendCharByKeyboardAPI(c);
+                    }
+
                     Thread.Sleep(Config.TypingDelayMs);
                 }
 
@@ -305,6 +317,23 @@ public class TypeToolApplication : ApplicationContext
         {
             _notificationForm.ShowMessage(title, msg);
         }
+    }
+
+    // GEÄNDERT (FIX ^/&-Problem):
+    // Vorher wurde über VkKeyScan() der virtuelle Tastencode für das Zeichen im
+    // AKTUELLEN Tastatur-Layout des Prozesses ermittelt und per keybd_event simuliert.
+    // Das schlägt fehl, wenn:
+    //  1) das Ziel-Fenster ein anderes Layout aktiv hat als TypeTool selbst, oder
+    //  2) das Zeichen (wie "^" auf der deutschen Tastatur) eine "tote Taste" (Dead Key) ist,
+    //     die eigentlich Taste+Leertaste braucht, um alleine zu erscheinen.
+    // Beides führte dazu, dass z.B. "^" sich mit dem nächsten Zeichen zu "&" o.ä. verband.
+    //
+    // Fix: Zeichen werden jetzt direkt als UNICODE über SendInput() injiziert.
+    // Das ist komplett unabhängig vom aktiven Tastatur-Layout und umgeht Dead-Keys,
+    // da Windows das Zeichen nicht mehr aus einem physischen Tastendruck ableiten muss.
+    private void SendCharByKeyboardAPI(char c)
+    {
+        NativeMethods.SendUnicodeChar(c);
     }
 
     private void RestartApp()
@@ -368,7 +397,7 @@ public static class IconGenerator
                 path.AddArc(rect.X, rect.Bottom - radius, radius, radius, 90, 90);
                 path.CloseFigure();
 
-                using (LinearGradientBrush brush = new LinearGradientBrush(rect, 
+                using (LinearGradientBrush brush = new LinearGradientBrush(rect,
                     Color.FromArgb(50, 50, 50), Color.FromArgb(10, 10, 10), 45f))
                 {
                     g.FillPath(brush, path);
@@ -383,7 +412,7 @@ public static class IconGenerator
             Rectangle barRect = new Rectangle(15, 50, 34, 4);
             using (Brush brush = new SolidBrush(Color.FromArgb(0, 190, 255)))
             {
-               g.FillRectangle(brush, barRect);
+                g.FillRectangle(brush, barRect);
             }
 
             // Text "TT"
@@ -392,7 +421,7 @@ public static class IconGenerator
                 StringFormat sf = new StringFormat();
                 sf.Alignment = StringAlignment.Center;
                 sf.LineAlignment = StringAlignment.Center;
-                
+
                 g.DrawString("TT", f, Brushes.Black, new Rectangle(3, 1, 60, 60), sf);
                 g.DrawString("TT", f, Brushes.White, new Rectangle(0, -2, 60, 60), sf);
             }
@@ -428,7 +457,7 @@ public class HotkeySettingsForm : Form
         this.MaximizeBox = false;
         this.MinimizeBox = false;
         this.StartPosition = FormStartPosition.CenterScreen;
-        this.KeyPreview = true; 
+        this.KeyPreview = true;
 
         var lbl1 = new Label { Text = "Hotkey zum Tippen:", Left = 20, Top = 20, AutoSize = true };
         _btnType = new Button { Text = _tempType.ToReadableString(), Left = 150, Top = 15, Width = 150 };
@@ -466,14 +495,14 @@ public class HotkeySettingsForm : Form
         if (e.KeyCode == Keys.ControlKey || e.KeyCode == Keys.ShiftKey || e.KeyCode == Keys.Menu) return;
 
         int mods = 0;
-        if (e.Control) mods |= 2; 
-        if (e.Alt) mods |= 1;     
-        if (e.Shift) mods |= 4;   
+        if (e.Control) mods |= 2;
+        if (e.Alt) mods |= 1;
+        if (e.Shift) mods |= 4;
 
         int vk = (int)e.KeyCode;
 
         var newDef = new HotkeyDef(mods, vk);
-        
+
         if (_activeButton == _btnType)
         {
             _tempType = newDef;
@@ -490,7 +519,7 @@ public class HotkeySettingsForm : Form
         _lblStatus.Text = "Klicke auf einen Button zum Ändern...";
         _lblStatus.ForeColor = Color.Gray;
 
-        e.SuppressKeyPress = true; 
+        e.SuppressKeyPress = true;
     }
 
     private void ApplyChanges()
@@ -568,15 +597,23 @@ public class NotificationForm : Form
         this.BackColor = Color.FromArgb(40, 40, 40);
         this.DoubleBuffered = true;
 
-        _lblTitle = new Label { 
-            Left = 10, Top = 5, Width = 280, Height = 20, 
+        _lblTitle = new Label
+        {
+            Left = 10,
+            Top = 5,
+            Width = 280,
+            Height = 20,
             ForeColor = Color.FromArgb(0, 190, 255),
             Font = new Font("Segoe UI", 9, FontStyle.Bold),
             Text = "Info"
         };
 
-        _lblText = new Label { 
-            Left = 10, Top = 30, Width = 280, Height = 40, 
+        _lblText = new Label
+        {
+            Left = 10,
+            Top = 30,
+            Width = 280,
+            Height = 40,
             ForeColor = Color.White,
             Font = new Font("Segoe UI", 9, FontStyle.Regular),
             Text = "...",
@@ -601,11 +638,11 @@ public class NotificationForm : Form
         Rectangle workingArea = Screen.PrimaryScreen.WorkingArea;
         this.Location = new Point(workingArea.Right - this.Width - 10, workingArea.Bottom - this.Height - 10);
 
-        if (!this.Visible) 
+        if (!this.Visible)
         {
             this.Show();
         }
-        
+
         // Timer reset
         _timer.Stop();
         _timer.Start();
@@ -619,6 +656,161 @@ static class NativeMethods
     public const int MOD_CONTROL = 0x0002;
     public const int VK_CONTROL = 0x11;
     public const int VK_ESCAPE = 0x1B;
+
+    private const int INPUT_KEYBOARD = 1;
+    private const uint KEYEVENTF_UNICODE = 0x0004;
+    private const uint KEYEVENTF_KEYUP = 0x0002;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KEYBDINPUT
+    {
+        public ushort wVk;
+        public ushort wScan;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    // NEU (Fix "tippt nicht mehr"): MOUSEINPUT und HARDWAREINPUT müssen mit in der
+    // Union stehen, auch wenn wir sie nicht benutzen. Ohne sie ist die Union (und damit
+    // die gesamte INPUT-Struktur) kleiner als die von Windows erwartete Größe.
+    // SendInput vergleicht das übergebene cbSize exakt mit sizeof(INPUT) des Systems
+    // und lehnt den kompletten Aufruf sonst KOMMENTARLOS ab (Rückgabewert 0) -
+    // genau das war die Ursache dafür, dass gar nichts mehr getippt wurde.
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MOUSEINPUT
+    {
+        public int dx;
+        public int dy;
+        public uint mouseData;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct HARDWAREINPUT
+    {
+        public uint uMsg;
+        public ushort wParamL;
+        public ushort wParamH;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct InputUnion
+    {
+        [FieldOffset(0)] public MOUSEINPUT mi;
+        [FieldOffset(0)] public KEYBDINPUT ki;
+        [FieldOffset(0)] public HARDWAREINPUT hi;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct INPUT
+    {
+        public uint type;
+        public InputUnion U;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+    // NEU (Fix ^/&-Problem): Sendet ein beliebiges Unicode-Zeichen unabhängig
+    // vom aktiven Tastatur-Layout und ohne Dead-Key-Probleme (z.B. "^", "´", "`").
+    public static void SendUnicodeChar(char c)
+    {
+        // Wichtig: cbSize MUSS die Größe einer EINZELNEN INPUT-Struktur sein
+        int cbSize = Marshal.SizeOf(typeof(INPUT));
+
+        var down = new INPUT
+        {
+            type = INPUT_KEYBOARD,
+            U = new InputUnion
+            {
+                ki = new KEYBDINPUT
+                {
+                    wVk = 0,
+                    wScan = c,
+                    dwFlags = KEYEVENTF_UNICODE,
+                    time = 0,
+                    dwExtraInfo = IntPtr.Zero
+                }
+            }
+        };
+
+        var up = down;
+        up.U.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+
+        var inputs = new[] { down, up };
+
+        // Retry-Logik: Bei Fehlschlag kurz warten und erneut versuchen
+        uint sent = SendInput((uint)inputs.Length, inputs, cbSize);
+
+        if (sent == 0)
+        {
+            int err = Marshal.GetLastWin32Error();
+            Debug.WriteLine($"SendInput fehlgeschlagen für Zeichen '{c}', Win32-Error: {err}");
+
+            // Fallback: kurz warten und erneut versuchen
+            Thread.Sleep(5);
+            sent = SendInput((uint)inputs.Length, inputs, cbSize);
+
+            if (sent == 0)
+            {
+                int err2 = Marshal.GetLastWin32Error();
+                Debug.WriteLine($"SendInput Fallback fehlgeschlagen für Zeichen '{c}', Win32-Error: {err2}");
+            }
+        }
+    }
+
+    // NEU (Fix Zeilenumbrüche): Simuliert einen echten Enter-Tastendruck (VK_RETURN),
+    // damit Zeilenumbrüche im getippten Text tatsächlich als solche ankommen.
+    private const ushort VK_RETURN = 0x0D;
+
+    public static void SendEnterKey()
+    {
+        // Wichtig: cbSize MUSS die Größe einer EINZELNEN INPUT-Struktur sein
+        int cbSize = Marshal.SizeOf(typeof(INPUT));
+
+        var down = new INPUT
+        {
+            type = INPUT_KEYBOARD,
+            U = new InputUnion
+            {
+                ki = new KEYBDINPUT
+                {
+                    wVk = VK_RETURN,
+                    wScan = 0,
+                    dwFlags = 0,
+                    time = 0,
+                    dwExtraInfo = IntPtr.Zero
+                }
+            }
+        };
+
+        var up = down;
+        up.U.ki.dwFlags = KEYEVENTF_KEYUP;
+
+        var inputs = new[] { down, up };
+
+        // Retry-Logik: Bei Fehlschlag kurz warten und erneut versuchen
+        uint sent = SendInput((uint)inputs.Length, inputs, cbSize);
+
+        if (sent == 0)
+        {
+            int err = Marshal.GetLastWin32Error();
+            Debug.WriteLine($"SendInput (Enter) fehlgeschlagen, Win32-Error: {err}");
+
+            // Fallback: kurz warten und erneut versuchen
+            Thread.Sleep(5);
+            sent = SendInput((uint)inputs.Length, inputs, cbSize);
+
+            if (sent == 0)
+            {
+                int err2 = Marshal.GetLastWin32Error();
+                Debug.WriteLine($"SendInput (Enter) Fallback fehlgeschlagen, Win32-Error: {err2}");
+            }
+        }
+    }
 
     [DllImport("user32.dll")]
     public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
